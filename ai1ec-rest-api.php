@@ -4,7 +4,7 @@
  * Plugin URI: https://github.com/gserafini/ai1ec-rest-api
  * GitHub Plugin URI: gserafini/ai1ec-rest-api
  * Description: REST API endpoints for All-in-One Event Calendar by Time.ly plugin
- * Version: 1.0.0
+ * Version: 1.1.1
  * Author: Gabriel Serafini
  * Author URI: https://gabrielserafini.com
  * License: GPL v2 or later
@@ -19,20 +19,14 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Check if All-in-One Event Calendar is active
+// Silently check if All-in-One Event Calendar is active
+// If not active, plugin does nothing (safe for network activation)
 function ai1ec_rest_api_check_dependencies() {
     global $wpdb;
     // Check if AI1EC tables exist
     $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}ai1ec_events'");
-    if (!$table_exists) {
-        add_action('admin_notices', function() {
-            echo '<div class="error"><p><strong>AI1EC REST API:</strong> All-in-One Event Calendar plugin must be installed and activated.</p></div>';
-        });
-        return false;
-    }
-    return true;
+    return (bool)$table_exists;
 }
-add_action('plugins_loaded', 'ai1ec_rest_api_check_dependencies');
 
 // Plugin activation hook - flush permalinks to register new routes
 function ai1ec_rest_api_activate() {
@@ -53,6 +47,11 @@ function ai1ec_rest_api_disable_canonical_redirect($redirect_url, $requested_url
 add_action('rest_api_init', 'ai1ec_rest_api_register_routes');
 
 function ai1ec_rest_api_register_routes() {
+    // Exit silently if AI1EC is not active
+    if (!ai1ec_rest_api_check_dependencies()) {
+        return;
+    }
+
     $namespace = 'ai1ec/v1';
 
     // Event endpoints - use ai1ec_api prefix to avoid conflicts with custom post type
@@ -94,6 +93,11 @@ function ai1ec_rest_api_register_routes() {
             'callback' => 'ai1ec_rest_get_categories',
             'permission_callback' => 'ai1ec_rest_read_permission',
         ],
+        [
+            'methods' => 'POST',
+            'callback' => 'ai1ec_rest_create_category',
+            'permission_callback' => 'ai1ec_rest_write_permission',
+        ],
     ]);
 }
 
@@ -104,6 +108,57 @@ function ai1ec_rest_read_permission() {
 
 function ai1ec_rest_write_permission() {
     return current_user_can('edit_posts');
+}
+
+// Convert datetime string to GMT Unix timestamp
+function ai1ec_rest_datetime_to_gmt($datetime_str, $timezone_name = 'UTC') {
+    try {
+        $dt = new DateTime($datetime_str, new DateTimeZone($timezone_name));
+        $dt->setTimezone(new DateTimeZone('UTC'));
+        return $dt->getTimestamp();
+    } catch (Exception $e) {
+        // Fallback to strtotime if timezone conversion fails
+        return strtotime($datetime_str);
+    }
+}
+
+// Upload image from URL and set as featured image
+function ai1ec_rest_set_featured_image_from_url($post_id, $image_url, $alt_text = '') {
+    require_once(ABSPATH . 'wp-admin/includes/media.php');
+    require_once(ABSPATH . 'wp-admin/includes/file.php');
+    require_once(ABSPATH . 'wp-admin/includes/image.php');
+
+    // Download the image
+    $tmp = download_url($image_url);
+    if (is_wp_error($tmp)) {
+        return $tmp;
+    }
+
+    // Set up the array of arguments for wp_handle_sideload
+    $file_array = array(
+        'name' => basename($image_url),
+        'tmp_name' => $tmp
+    );
+
+    // Upload the file to the WordPress media library
+    $attachment_id = media_handle_sideload($file_array, $post_id);
+
+    // Clean up temp file
+    @unlink($tmp);
+
+    if (is_wp_error($attachment_id)) {
+        return $attachment_id;
+    }
+
+    // Set alt text if provided
+    if (!empty($alt_text)) {
+        update_post_meta($attachment_id, '_wp_attachment_image_alt', sanitize_text_field($alt_text));
+    }
+
+    // Set as featured image
+    set_post_thumbnail($post_id, $attachment_id);
+
+    return $attachment_id;
 }
 
 // Get AI1EC registry (if available)
@@ -130,10 +185,25 @@ function ai1ec_rest_format_event($event_data) {
     }
 
     // Get categories
+    $taxonomy_exists = taxonomy_exists('events_categories');
     $categories = wp_get_post_terms($post_id, 'events_categories', ['fields' => 'ids']);
+    $categories_debug = [
+        'result' => $categories,
+        'taxonomy_exists' => $taxonomy_exists,
+        'post_type' => get_post_type($post_id),
+    ];
+    if (is_wp_error($categories)) {
+        $categories = [];
+    } elseif ($categories === false || $categories === null) {
+        $categories = [];
+    }
 
     // Get tags
     $tags = wp_get_post_terms($post_id, 'events_tags', ['fields' => 'names']);
+    $tags_debug = $tags;
+    if (is_wp_error($tags)) {
+        $tags = [];
+    }
 
     return [
         'id' => $post_id,
@@ -162,8 +232,11 @@ function ai1ec_rest_format_event($event_data) {
         'status' => $post->post_status,
         'slug' => $post->post_name,
         'url' => get_permalink($post_id),
+        'featured_image_url' => get_the_post_thumbnail_url($post_id, 'full') ?: null,
         'created_date' => $post->post_date,
         'modified_date' => $post->post_modified,
+        'debug_cat_raw' => is_wp_error($categories_debug) ? $categories_debug->get_error_message() : $categories_debug,
+        'debug_tag_raw' => is_wp_error($tags_debug) ? $tags_debug->get_error_message() : $tags_debug,
     ];
 }
 
@@ -250,9 +323,10 @@ function ai1ec_rest_create_event($request) {
         return new WP_Error('creation_failed', 'Failed to create event', ['status' => 500]);
     }
 
-    // Parse dates
-    $start_timestamp = strtotime($params['start_date']);
-    $end_timestamp = isset($params['end_date']) ? strtotime($params['end_date']) : $start_timestamp + 3600;
+    // Parse dates - convert to GMT Unix timestamps
+    $timezone = $params['timezone'] ?? 'UTC';
+    $start_timestamp = ai1ec_rest_datetime_to_gmt($params['start_date'], $timezone);
+    $end_timestamp = isset($params['end_date']) ? ai1ec_rest_datetime_to_gmt($params['end_date'], $timezone) : $start_timestamp + 3600;
 
     // Insert into ai1ec_events table
     $table_name = $wpdb->prefix . 'ai1ec_events';
@@ -286,13 +360,23 @@ function ai1ec_rest_create_event($request) {
     }
 
     // Set categories if provided
+    $cat_result = null;
     if (!empty($params['categories']) && is_array($params['categories'])) {
-        wp_set_post_terms($post_id, $params['categories'], 'events_categories');
+        $cat_result = wp_set_object_terms($post_id, $params['categories'], 'events_categories', false);
+        // Force term count update
+        wp_update_term_count_now($params['categories'], 'events_categories');
     }
 
     // Set tags if provided
+    $tag_result = null;
     if (!empty($params['tags']) && is_array($params['tags'])) {
-        wp_set_post_terms($post_id, $params['tags'], 'events_tags');
+        $tag_result = wp_set_post_terms($post_id, $params['tags'], 'events_tags', false);
+    }
+
+    // Set featured image if provided
+    if (!empty($params['featured_image_url'])) {
+        $alt_text = $params['featured_image_alt'] ?? '';
+        ai1ec_rest_set_featured_image_from_url($post_id, $params['featured_image_url'], $alt_text);
     }
 
     // Get created event
@@ -301,12 +385,22 @@ function ai1ec_rest_create_event($request) {
         ARRAY_A
     );
 
-    return rest_ensure_response([
+    $response = [
         'success' => true,
         'event_id' => $post_id,
         'event' => ai1ec_rest_format_event($created_event),
         'message' => 'Event created successfully',
-    ]);
+    ];
+
+    // Add debug info for category/tag updates
+    if ($cat_result !== null) {
+        $response['debug_create_cat'] = is_wp_error($cat_result) ? $cat_result->get_error_message() : $cat_result;
+    }
+    if ($tag_result !== null) {
+        $response['debug_create_tag'] = is_wp_error($tag_result) ? $tag_result->get_error_message() : $tag_result;
+    }
+
+    return rest_ensure_response($response);
 }
 
 // Update event
@@ -347,11 +441,15 @@ function ai1ec_rest_update_event($request) {
 
     // Update event data
     $event_update = [];
+
+    // Get timezone for date conversion (use provided timezone or existing one)
+    $timezone = $params['timezone'] ?? $event['timezone_name'] ?? 'UTC';
+
     if (isset($params['start_date'])) {
-        $event_update['start'] = strtotime($params['start_date']);
+        $event_update['start'] = ai1ec_rest_datetime_to_gmt($params['start_date'], $timezone);
     }
     if (isset($params['end_date'])) {
-        $event_update['end'] = strtotime($params['end_date']);
+        $event_update['end'] = ai1ec_rest_datetime_to_gmt($params['end_date'], $timezone);
     }
     if (isset($params['timezone'])) {
         $event_update['timezone_name'] = sanitize_text_field($params['timezone']);
@@ -408,13 +506,26 @@ function ai1ec_rest_update_event($request) {
     }
 
     // Update categories if provided
+    $cat_result = null;
     if (isset($params['categories']) && is_array($params['categories'])) {
-        wp_set_post_terms($post_id, $params['categories'], 'events_categories');
+        // First clear existing terms
+        wp_set_object_terms($post_id, array(), 'events_categories');
+        // Then set new terms
+        $cat_result = wp_set_object_terms($post_id, $params['categories'], 'events_categories', false);
+        // Force term count update
+        wp_update_term_count_now($params['categories'], 'events_categories');
     }
 
     // Update tags if provided
+    $tag_result = null;
     if (isset($params['tags']) && is_array($params['tags'])) {
-        wp_set_post_terms($post_id, $params['tags'], 'events_tags');
+        $tag_result = wp_set_post_terms($post_id, $params['tags'], 'events_tags', false);
+    }
+
+    // Update featured image if provided
+    if (isset($params['featured_image_url'])) {
+        $alt_text = $params['featured_image_alt'] ?? '';
+        ai1ec_rest_set_featured_image_from_url($post_id, $params['featured_image_url'], $alt_text);
     }
 
     // Get updated event
@@ -423,11 +534,21 @@ function ai1ec_rest_update_event($request) {
         ARRAY_A
     );
 
-    return rest_ensure_response([
+    $response = [
         'success' => true,
         'event' => ai1ec_rest_format_event($updated_event),
         'message' => 'Event updated successfully',
-    ]);
+    ];
+
+    // Add debug info for category/tag updates
+    if ($cat_result !== null) {
+        $response['debug_cat'] = is_wp_error($cat_result) ? $cat_result->get_error_message() : $cat_result;
+    }
+    if ($tag_result !== null) {
+        $response['debug_tag'] = is_wp_error($tag_result) ? $tag_result->get_error_message() : $tag_result;
+    }
+
+    return rest_ensure_response($response);
 }
 
 // Delete event
@@ -489,5 +610,50 @@ function ai1ec_rest_get_categories($request) {
         'success' => true,
         'categories' => $categories,
         'count' => count($categories),
+    ]);
+}
+
+// Create category
+function ai1ec_rest_create_category($request) {
+    $params = $request->get_json_params();
+
+    // Validate required fields
+    if (empty($params['name'])) {
+        return new WP_Error('missing_name', 'Category name is required', ['status' => 400]);
+    }
+
+    // Prepare term data
+    $args = [];
+    if (!empty($params['slug'])) {
+        $args['slug'] = sanitize_title($params['slug']);
+    }
+    if (!empty($params['description'])) {
+        $args['description'] = sanitize_text_field($params['description']);
+    }
+
+    // Create term
+    $result = wp_insert_term(
+        sanitize_text_field($params['name']),
+        'events_categories',
+        $args
+    );
+
+    if (is_wp_error($result)) {
+        return new WP_Error('creation_failed', $result->get_error_message(), ['status' => 500]);
+    }
+
+    // Get the created term
+    $term = get_term($result['term_id'], 'events_categories');
+
+    return rest_ensure_response([
+        'success' => true,
+        'category' => [
+            'id' => $term->term_id,
+            'name' => $term->name,
+            'slug' => $term->slug,
+            'description' => $term->description,
+            'count' => $term->count,
+        ],
+        'message' => 'Category created successfully',
     ]);
 }
