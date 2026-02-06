@@ -1,9 +1,9 @@
 === All-in-One Event Calendar REST API ===
 Contributors: gabrielserafini
-Tags: events, rest-api, all-in-one-event-calendar, timely, api, calendar
+Tags: events, rest-api, all-in-one-event-calendar, api, calendar
 Requires at least: 5.0
-Tested up to: 6.8
-Stable tag: 1.0.0
+Tested up to: 6.9
+Stable tag: 1.1.2
 Requires PHP: 7.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -37,6 +37,14 @@ Since Time.ly discontinued the free plugin, this helps maintain event management
 This plugin is designed for the legacy version 3.x of All-in-One Event Calendar by Time.ly.
 
 == Changelog ==
+
+= 1.1.2 =
+* Security: Add post_status validation for event creation
+* Tested up to WordPress 6.9
+* Coding standards: PHPCS WordPress-Extra formatting improvements
+
+= 1.1.1 =
+* Maintenance release with minor fixes
 
 = 1.0.0 - 2025-10-30 =
 * Initial release
