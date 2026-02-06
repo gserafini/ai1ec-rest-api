@@ -4,7 +4,7 @@
  * Plugin URI: https://github.com/gserafini/ai1ec-rest-api
  * GitHub Plugin URI: gserafini/ai1ec-rest-api
  * Description: REST API endpoints for All-in-One Event Calendar by Time.ly plugin
- * Version: 1.1.2
+ * Version: 1.2.0
  * Author: Gabriel Serafini
  * Author URI: https://gabrielserafini.com
  * License: GPL v2 or later
@@ -173,6 +173,61 @@ function ai1ec_rest_set_featured_image_from_url( $post_id, $image_url, $alt_text
 	set_post_thumbnail( $post_id, $attachment_id );
 
 	return $attachment_id;
+}
+
+/**
+ * Reliably assign events_categories to a post.
+ *
+ * On WordPress multisite, the same term can exist in multiple taxonomies
+ * (e.g., term 43 "Lectures" may exist in category, events_categories, AND post_tag).
+ * wp_set_object_terms() can resolve to the wrong taxonomy.
+ *
+ * This function uses direct SQL to look up the correct term_taxonomy_id for the
+ * events_categories taxonomy and insert term_relationships directly.
+ *
+ * @param int   $post_id   The post ID.
+ * @param array $term_ids  Array of term IDs in events_categories taxonomy.
+ * @return array Array of assigned term_taxonomy_ids, or WP_Error on failure.
+ */
+function ai1ec_rest_set_event_categories( $post_id, $term_ids ) {
+	global $wpdb;
+
+	$assigned = array();
+
+	foreach ( $term_ids as $term_id ) {
+		$term_id = intval( $term_id );
+
+		// Look up the term_taxonomy_id specifically for events_categories.
+		$tt_id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT term_taxonomy_id FROM $wpdb->term_taxonomy WHERE term_id = %d AND taxonomy = 'events_categories'",
+				$term_id
+			)
+		);
+
+		if ( ! $tt_id ) {
+			continue; // Term doesn't exist in events_categories taxonomy.
+		}
+
+		// Insert the relationship directly.
+		$wpdb->replace(
+			$wpdb->term_relationships,
+			array(
+				'object_id'        => $post_id,
+				'term_taxonomy_id' => intval( $tt_id ),
+				'term_order'       => 0,
+			)
+		);
+
+		$assigned[] = intval( $tt_id );
+	}
+
+	// Update term counts for all assigned terms.
+	if ( ! empty( $assigned ) ) {
+		wp_update_term_count( $assigned, 'events_categories' );
+	}
+
+	return $assigned;
 }
 
 // Get AI1EC registry (if available)
@@ -379,12 +434,25 @@ function ai1ec_rest_create_event( $request ) {
 		return new WP_Error( 'creation_failed', 'Failed to create event data', array( 'status' => 500 ) );
 	}
 
-	// Set categories if provided
+	// CRITICAL: Insert into ai1ec_event_instances table.
+	// AI1EC uses this table for calendar display, agenda widgets, and date queries.
+	// Without an instance record, the event will NOT appear on the calendar or widgets.
+	$instances_table = $wpdb->prefix . 'ai1ec_event_instances';
+	$wpdb->insert(
+		$instances_table,
+		array(
+			'post_id' => $post_id,
+			'start'   => $start_timestamp,
+			'end'     => $end_timestamp,
+		),
+		array( '%d', '%d', '%d' )
+	);
+
+	// Set categories if provided.
+	// Uses ai1ec_rest_set_event_categories() for reliable multisite taxonomy assignment.
 	$cat_result = null;
 	if ( ! empty( $params['categories'] ) && is_array( $params['categories'] ) ) {
-		$cat_result = wp_set_object_terms( $post_id, $params['categories'], 'events_categories', false );
-		// Force term count update
-		wp_update_term_count_now( $params['categories'], 'events_categories' );
+		$cat_result = ai1ec_rest_set_event_categories( $post_id, $params['categories'] );
 	}
 
 	// Set tags if provided
@@ -526,17 +594,50 @@ function ai1ec_rest_update_event( $request ) {
 			$event_update,
 			array( 'post_id' => $post_id )
 		);
+
+		// Sync ai1ec_event_instances if dates changed.
+		if ( isset( $event_update['start'] ) || isset( $event_update['end'] ) ) {
+			$instances_table = $wpdb->prefix . 'ai1ec_event_instances';
+			$new_start       = $event_update['start'] ?? $event['start'];
+			$new_end         = $event_update['end'] ?? $event['end'];
+
+			// Update existing instance or create if missing.
+			$instance_exists = $wpdb->get_var(
+				$wpdb->prepare( "SELECT id FROM $instances_table WHERE post_id = %d LIMIT 1", $post_id ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name from $wpdb->prefix.
+			);
+
+			if ( $instance_exists ) {
+				$wpdb->update(
+					$instances_table,
+					array(
+						'start' => $new_start,
+						'end'   => $new_end,
+					),
+					array( 'post_id' => $post_id ),
+					array( '%d', '%d' ),
+					array( '%d' )
+				);
+			} else {
+				$wpdb->insert(
+					$instances_table,
+					array(
+						'post_id' => $post_id,
+						'start'   => $new_start,
+						'end'     => $new_end,
+					),
+					array( '%d', '%d', '%d' )
+				);
+			}
+		}
 	}
 
-	// Update categories if provided
+	// Update categories if provided.
+	// Uses ai1ec_rest_set_event_categories() for reliable multisite taxonomy assignment.
 	$cat_result = null;
 	if ( isset( $params['categories'] ) && is_array( $params['categories'] ) ) {
-		// First clear existing terms
+		// Clear existing event categories first.
 		wp_set_object_terms( $post_id, array(), 'events_categories' );
-		// Then set new terms
-		$cat_result = wp_set_object_terms( $post_id, $params['categories'], 'events_categories', false );
-		// Force term count update
-		wp_update_term_count_now( $params['categories'], 'events_categories' );
+		$cat_result = ai1ec_rest_set_event_categories( $post_id, $params['categories'] );
 	}
 
 	// Update tags if provided
@@ -593,6 +694,10 @@ function ai1ec_rest_delete_event( $request ) {
 
 	// Delete from ai1ec_events table first
 	$wpdb->delete( $table_name, array( 'post_id' => $post_id ) );
+
+	// Delete from ai1ec_event_instances table
+	$instances_table = $wpdb->prefix . 'ai1ec_event_instances';
+	$wpdb->delete( $instances_table, array( 'post_id' => $post_id ) );
 
 	// Delete WordPress post (this also deletes terms)
 	$result = wp_delete_post( $post_id, true );
