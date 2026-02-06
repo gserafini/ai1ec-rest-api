@@ -16,11 +16,21 @@ This plugin provides RESTful API endpoints for the legacy All-in-One Event Calen
 ## Features
 
 * Full CRUD operations for events
-* Venue and location management  
+* Venue and location management
 * Category management
 * Contact information support
 * WordPress application password authentication
 * Git Updater support for automatic updates
+* Automatic `ai1ec_event_instances` record creation (v1.2.0+) - required for calendar and widget display
+* Reliable multisite category assignment (v1.2.0+) - uses direct SQL to avoid taxonomy conflicts
+
+## Multisite Support
+
+On WordPress multisite, the same term (e.g., "Lectures") can exist in multiple taxonomies with different `term_taxonomy_id` values. The standard `wp_set_object_terms()` function may resolve to the wrong taxonomy.
+
+Starting with v1.2.0, this plugin uses direct SQL with `term_taxonomy_id` lookup specifically for the `events_categories` taxonomy, ensuring correct category assignment on multisite installations.
+
+AI1EC also requires records in both `ai1ec_events` and `ai1ec_event_instances` tables for events to appear on calendar pages and agenda widgets. v1.2.0+ handles this automatically on create, update, and delete.
 
 ## API Endpoints
 

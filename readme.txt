@@ -3,7 +3,7 @@ Contributors: gabrielserafini
 Tags: events, rest-api, all-in-one-event-calendar, api, calendar
 Requires at least: 5.0
 Tested up to: 6.9
-Stable tag: 1.1.2
+Stable tag: 1.2.0
 Requires PHP: 7.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -22,6 +22,8 @@ Since Time.ly discontinued the free plugin, this helps maintain event management
 * Venue and location management
 * Category management
 * WordPress application password authentication
+* Automatic `ai1ec_event_instances` record creation (required for calendar/widget display)
+* Reliable multisite category assignment (direct SQL avoids taxonomy conflicts)
 
 == Installation ==
 
@@ -37,6 +39,13 @@ Since Time.ly discontinued the free plugin, this helps maintain event management
 This plugin is designed for the legacy version 3.x of All-in-One Event Calendar by Time.ly.
 
 == Changelog ==
+
+= 1.2.0 =
+* Feature: Automatically create ai1ec_event_instances records on event creation (fixes events not appearing on calendar/widgets)
+* Feature: Sync event_instances when dates are updated
+* Feature: Clean up event_instances on event deletion
+* Feature: New ai1ec_rest_set_event_categories() for reliable multisite category assignment using direct SQL with correct term_taxonomy_id lookup
+* Fix: wp_set_object_terms() could assign wrong taxonomy on multisite (e.g., category instead of events_categories)
 
 = 1.1.2 =
 * Security: Add post_status validation for event creation
