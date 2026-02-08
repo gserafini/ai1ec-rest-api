@@ -1,0 +1,48 @@
+{
+	"parent_plugin": "All-in-One Event Calendar",
+	"parent_slug_wporg": "all-in-one-event-calendar",
+	"tested_version": "3.0.2",
+	"tested_date": "2026-02-08",
+	"note": "Parent plugin is DISCONTINUED. No new releases expected.",
+	"functions_used": [],
+	"tables_used": [
+		"ai1ec_events",
+		"ai1ec_event_instances"
+	],
+	"post_types_used": [
+		"ai1ec_event"
+	],
+	"taxonomies_used": [
+		"events_categories",
+		"events_tags"
+	],
+	"table_columns": {
+		"ai1ec_events": [
+			"post_id",
+			"start",
+			"end",
+			"timezone_name",
+			"allday",
+			"instant_event",
+			"venue",
+			"address",
+			"city",
+			"province",
+			"postal_code",
+			"country",
+			"cost",
+			"contact_name",
+			"contact_phone",
+			"contact_email",
+			"contact_url",
+			"ticket_url",
+			"show_map"
+		],
+		"ai1ec_event_instances": [
+			"id",
+			"post_id",
+			"start",
+			"end"
+		]
+	}
+}
